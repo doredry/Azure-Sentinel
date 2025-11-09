@@ -1,0 +1,76 @@
+id: 9e4f8a1b-2c3d-4e5f-6a7b-8c9d0e1f2a3b
+name: AI Agents - Email AI-Controlled Inputs
+description: |
+  'Identifies AI agents configured to send emails with AI-controlled inputs that may contain sensitive or inappropriate content.
+  This configuration poses security risks as AI-generated content may include unintended information disclosure, hallucinations,
+  or other content that should be reviewed before external transmission.'
+requiredDataConnectors: []
+tactics:
+  - Exfiltration
+  - Impact
+relevantTechniques:
+  - T1041
+  - T1565
+query: |
+  // Find agents configured to send emails with AI-controlled inputs 
+  let SendOps = dynamic([ 
+      "SendEmailV2",             // Office 365 Outlook 
+      "SharedMailboxSendEmailV2",// Office 365 Outlook 
+      "SendEmailV2",             // Gmail 
+      "SendEmailV3",             // SMTP 
+      "SendEmailV3",             // Mail 
+      "SendEmailGAVersion",      // Azure Communication Email 
+      "PostAntTextEmail",        // Ant Text Automation 
+      "SendEmailV4"              // SendGrid 
+  ]); 
+  let FromActions = 
+      AIAgentsInfo 
+      | summarize arg_max(Timestamp, *) by AIAgentId 
+      | where AgentStatus != "Deleted" 
+      | mv-expand ActionDetail = todynamic(AgentToolsDetails) 
+      | where tostring(ActionDetail.action.operationId) in~ (SendOps) 
+      | mv-expand ActionInput = ActionDetail.inputs 
+      | where tostring(ActionInput.propertyName) in~ ("Body", "Subject", "Importance") 
+      | where ActionInput.value has "binding" and ActionInput.value.binding has_any("Topic.LastMessage.Text", "turn.activity.text", "Topic.Activity.Text") 
+      | extend AIContent = ActionInput.value.binding, InputType = ActionInput.propertyName, MailConnector = tostring(ActionDetail.action.operationId), source = "AgentToolsDetails" 
+      | project-reorder AgentCreationTime, AIAgentId, AIAgentName, AgentStatus, CreatorAccountUpn, OwnerAccountUpns, InputType, AIContent, source, MailConnector; 
+  let FromTopics = 
+      AIAgentsInfo 
+      | summarize arg_max(Timestamp, *) by AIAgentId 
+      | where AgentStatus != "Deleted" 
+      | mv-expand TopicDetail = todynamic(AgentTopicsDetails) 
+      | mv-expand TopicAction = TopicDetail.beginDialog.actions 
+      | where tostring(TopicAction.operationId) in~ (SendOps) 
+      | extend BodyBinding = tostring(coalesce(TopicAction.input.binding.Body, TopicAction.input.binding['body'])) 
+      | extend SubjectBinding = tostring(coalesce(TopicAction.input.binding.Subject, TopicAction.input.binding['subject'])) 
+      | where BodyBinding has_any("Topic.LastMessage.Text", "Topic.Activity.Text", "turn.activity.text") or SubjectBinding has_any("Topic.LastMessage.Text", "Topic.Activity.Text", "turn.activity.text") 
+      | extend AIContent = strcat("Body: ", BodyBinding, " Subject: ", SubjectBinding), MailConnector = tostring(TopicAction.operationId), source = "AgentTopicsDetails" 
+      | project-reorder AgentCreationTime, AIAgentId, AIAgentName, AgentStatus, CreatorAccountUpn, OwnerAccountUpns, AIContent, source, MailConnector; 
+  FromActions 
+  | union FromTopics 
+  | project-reorder AgentCreationTime, AIAgentId, AIAgentName, AgentStatus, CreatorAccountUpn, OwnerAccountUpns
+  | extend AccountCustomEntity = CreatorAccountUpn
+  | extend HostCustomEntity = AIAgentName
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: CreatorAccountUpn
+      - identifier: Name
+        columnName: AccountCustomEntity
+  - entityType: Host
+    fieldMappings:
+      - identifier: HostName
+        columnName: AIAgentName
+      - identifier: FullName
+        columnName: HostCustomEntity
+version: 1.0.0
+metadata:
+    source:
+        kind: Community
+    author:
+        name: Community Contributor
+    support:
+        tier: Community
+    categories:
+        domains: [ "Security - AI Agents Governance" ]
